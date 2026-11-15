@@ -28,7 +28,6 @@ static void Persist(NSString *stage, BOOL pasteboard) {
     if (pasteboard) UIPasteboard.generalPasteboard.string = report;
 }
 
-/* ---- أداة استبدال آمنة: تتحقق من "عدد الوسائط" و"أن القيمة المُرجعة void" بدل مطابقة نص الترميز حرفيًا ---- */
 static BOOL SafeSwizzle(Class cls, SEL sel, unsigned expectedArgCount, IMP newImp, IMP *outOrig) {
     if (!cls) { L(@"swizzle skip: class nil for %@", NSStringFromSelector(sel)); return NO; }
     Method m = class_getInstanceMethod(cls, sel);
@@ -46,7 +45,6 @@ static BOOL SafeSwizzle(Class cls, SEL sel, unsigned expectedArgCount, IMP newIm
     return YES;
 }
 
-/* ---- GADInterstitialAd presentFromRootViewController: ---- */
 static IMP gOrigPresent;
 static void HookPresent(id self, SEL _cmd, UIViewController *vc) {
     L(@"EVENT GADInterstitialAd presentFromRootViewController: vc=%@", NSStringFromClass(vc.class));
@@ -54,7 +52,6 @@ static void HookPresent(id self, SEL _cmd, UIViewController *vc) {
     ((void(*)(id,SEL,UIViewController*))gOrigPresent)(self, _cmd, vc);
 }
 
-/* ---- MAInterstitialAd showAdForPlacement: ---- */
 static IMP gOrigShow1;
 static void HookShow1(id self, SEL _cmd, NSString *placement) {
     L(@"EVENT MAInterstitialAd showAdForPlacement: placement=%@", placement);
@@ -62,7 +59,6 @@ static void HookShow1(id self, SEL _cmd, NSString *placement) {
     ((void(*)(id,SEL,NSString*))gOrigShow1)(self, _cmd, placement);
 }
 
-/* ---- MAInterstitialAd showAdForPlacement:customData: ---- */
 static IMP gOrigShow2;
 static void HookShow2(id self, SEL _cmd, NSString *placement, NSString *customData) {
     L(@"EVENT MAInterstitialAd showAdForPlacement:customData: placement=%@", placement);
@@ -70,7 +66,6 @@ static void HookShow2(id self, SEL _cmd, NSString *placement, NSString *customDa
     ((void(*)(id,SEL,NSString*,NSString*))gOrigShow2)(self, _cmd, placement, customData);
 }
 
-/* ---- MAInterstitialAd showAdForPlacement:customData:viewController: ---- */
 static IMP gOrigShow3;
 static void HookShow3(id self, SEL _cmd, NSString *placement, NSString *customData, UIViewController *vc) {
     L(@"EVENT MAInterstitialAd showAdForPlacement:customData:viewController: placement=%@", placement);
@@ -78,7 +73,6 @@ static void HookShow3(id self, SEL _cmd, NSString *placement, NSString *customDa
     ((void(*)(id,SEL,NSString*,NSString*,UIViewController*))gOrigShow3)(self, _cmd, placement, customData, vc);
 }
 
-/* ---- UIView didMoveToWindow (مراقبة ظهور البانر فقط، آمن ومحايد) ---- */
 static IMP gOrigDidMoveToWindow;
 static void HookDidMoveToWindow(UIView *self, SEL _cmd) {
     static Class bannerCls, maxAdViewCls, maxNativeCls;
@@ -119,6 +113,10 @@ __attribute__((constructor)) static void AdProbeInit(void) {
 
     SafeSwizzle(UIView.class, @selector(didMoveToWindow),
                 2, (IMP)HookDidMoveToWindow, &gOrigDidMoveToWindow);
+
+    /* سطر جديد فقط: نتأكد هل بروتوكول تبليغ إغلاق الإعلان موجود، بدون أي ربط فعلي بعد */
+    Protocol *fscd = NSProtocolFromString(@"GADFullScreenContentDelegate");
+    L(@"protocol GADFullScreenContentDelegate: %@", fscd ? @"found" : @"missing");
 
     Persist(@"constructor", YES);
 }
