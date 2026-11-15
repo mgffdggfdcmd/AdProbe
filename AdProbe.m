@@ -118,5 +118,5 @@ __attribute__((constructor)) static void AdProbeInit(void) {
     SafeSwizzle(UIView.class, @selector(didMoveToWindow),
                 "v@:", (IMP)HookDidMoveToWindow, &gOrigDidMoveToWindow);
 
-    Persist(@"constructor", NO);
+    Persist(@"constructor", YES);
 }
