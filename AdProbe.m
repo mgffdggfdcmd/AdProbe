@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #include <dlfcn.h>
 #include <unistd.h>
 #include <string.h>
@@ -35,44 +36,51 @@ static BOOL SafeSwizzle(Class cls, SEL sel, unsigned expectedArgCount, IMP newIm
     const char *enc = method_getTypeEncoding(m);
     unsigned argc = method_getNumberOfArguments(m);
     if (enc[0] != 'v' || argc != expectedArgCount) {
-        L(@"swizzle skip: %@ -%@ encoding=%s argc=%u (expected void, argc=%u)",
-          NSStringFromClass(cls), NSStringFromSelector(sel), enc, argc, expectedArgCount);
+        L(@"swizzle skip: %@ -%@ encoding=%s argc=%u", NSStringFromClass(cls), NSStringFromSelector(sel), enc, argc);
         return NO;
     }
     *outOrig = method_getImplementation(m);
     method_setImplementation(m, newImp);
-    L(@"swizzle OK: %@ -%@ encoding=%s", NSStringFromClass(cls), NSStringFromSelector(sel), enc);
+    L(@"swizzle OK: %@ -%@", NSStringFromClass(cls), NSStringFromSelector(sel));
     return YES;
 }
 
+/* ---- يبحث داخل بروتوكول GADFullScreenContentDelegate عن دالة اسمها يحتوي "DidDismiss" ---- */
+static SEL FindDismissSelector(void) {
+    Protocol *p = NSProtocolFromString(@"GADFullScreenContentDelegate");
+    if (!p) return NULL;
+    unsigned int count = 0;
+    struct objc_method_description *list = protocol_copyMethodDescriptionList(p, NO, YES, &count);
+    SEL found = NULL;
+    for (unsigned int i = 0; i < count; i++) {
+        NSString *name = NSStringFromSelector(list[i].name);
+        if ([name rangeOfString:@"DidDismiss"].location != NSNotFound) { found = list[i].name; break; }
+    }
+    if (list) free(list);
+    return found;
+}
+
+/* ---- الإعلان البيني العادي (GADInterstitialAd): يُمنع فعليًا هنا ---- */
 static IMP gOrigPresent;
 static void HookPresent(id self, SEL _cmd, UIViewController *vc) {
-    L(@"EVENT GADInterstitialAd presentFromRootViewController: vc=%@", NSStringFromClass(vc.class));
+    L(@"EVENT interstitial BLOCKED (not calling original present)");
+    id delegate = nil;
+    if ([self respondsToSelector:@selector(fullScreenContentDelegate)]) {
+        delegate = ((id(*)(id, SEL))objc_msgSend)(self, @selector(fullScreenContentDelegate));
+    }
+    SEL dismissSel = FindDismissSelector();
+    if (delegate && dismissSel && [delegate respondsToSelector:dismissSel]) {
+        L(@"notifying delegate %@ via %@", NSStringFromClass([delegate class]), NSStringFromSelector(dismissSel));
+        ((void(*)(id, SEL, id))objc_msgSend)(delegate, dismissSel, self);
+    } else {
+        L(@"no delegate notified (delegate=%@ sel=%@)", delegate ? @"yes" : @"no",
+          dismissSel ? NSStringFromSelector(dismissSel) : @"not found");
+    }
     Persist(@"event", YES);
-    ((void(*)(id,SEL,UIViewController*))gOrigPresent)(self, _cmd, vc);
+    /* لا نستدعي gOrigPresent عمدًا — هذا هو المنع الفعلي */
 }
 
-static IMP gOrigShow1;
-static void HookShow1(id self, SEL _cmd, NSString *placement) {
-    L(@"EVENT MAInterstitialAd showAdForPlacement: placement=%@", placement);
-    Persist(@"event", YES);
-    ((void(*)(id,SEL,NSString*))gOrigShow1)(self, _cmd, placement);
-}
-
-static IMP gOrigShow2;
-static void HookShow2(id self, SEL _cmd, NSString *placement, NSString *customData) {
-    L(@"EVENT MAInterstitialAd showAdForPlacement:customData: placement=%@", placement);
-    Persist(@"event", YES);
-    ((void(*)(id,SEL,NSString*,NSString*))gOrigShow2)(self, _cmd, placement, customData);
-}
-
-static IMP gOrigShow3;
-static void HookShow3(id self, SEL _cmd, NSString *placement, NSString *customData, UIViewController *vc) {
-    L(@"EVENT MAInterstitialAd showAdForPlacement:customData:viewController: placement=%@", placement);
-    Persist(@"event", YES);
-    ((void(*)(id,SEL,NSString*,NSString*,UIViewController*))gOrigShow3)(self, _cmd, placement, customData, vc);
-}
-
+/* ---- البانر: مراقبة فقط، بدون منع حاليًا ---- */
 static IMP gOrigDidMoveToWindow;
 static void HookDidMoveToWindow(UIView *self, SEL _cmd) {
     static Class bannerCls, maxAdViewCls, maxNativeCls;
@@ -85,29 +93,10 @@ static void HookDidMoveToWindow(UIView *self, SEL _cmd) {
     if ((bannerCls && [self isKindOfClass:bannerCls]) ||
         (maxAdViewCls && [self isKindOfClass:maxAdViewCls]) ||
         (maxNativeCls && [self isKindOfClass:maxNativeCls])) {
-        L(@"EVENT banner didMoveToWindow class=%@ window=%@", NSStringFromClass(self.class),
-          self.window ? @"attached" : @"detached");
+        L(@"EVENT banner still showing (not blocked yet) class=%@", NSStringFromClass(self.class));
         Persist(@"event", YES);
     }
     ((void(*)(id,SEL))gOrigDidMoveToWindow)(self, _cmd);
-}
-
-/* ---- جديد: مسح كل الفئات المحمَّلة لإيجاد من يطبّق بروتوكول تبليغ إغلاق الإعلان ---- */
-static void ScanDelegateClasses(void) {
-    Protocol *fscd = NSProtocolFromString(@"GADFullScreenContentDelegate");
-    if (!fscd) { L(@"scan: protocol missing"); Persist(@"scan", YES); return; }
-    unsigned int count = 0;
-    Class *classes = objc_copyClassList(&count);
-    NSMutableArray *matches = [NSMutableArray array];
-    for (unsigned int i = 0; i < count; i++) {
-        if (class_conformsToProtocol(classes[i], fscd)) {
-            [matches addObject:NSStringFromClass(classes[i])];
-        }
-    }
-    free(classes);
-    L(@"scan: classes conforming to GADFullScreenContentDelegate = %lu", (unsigned long)matches.count);
-    for (NSString *n in matches) L(@"  - %@", n);
-    Persist(@"scan", YES);
 }
 
 __attribute__((constructor)) static void AdProbeInit(void) {
@@ -120,23 +109,11 @@ __attribute__((constructor)) static void AdProbeInit(void) {
     SafeSwizzle(NSClassFromString(@"GADInterstitialAd"), NSSelectorFromString(@"presentFromRootViewController:"),
                 3, (IMP)HookPresent, &gOrigPresent);
 
-    SafeSwizzle(NSClassFromString(@"MAInterstitialAd"), NSSelectorFromString(@"showAdForPlacement:"),
-                3, (IMP)HookShow1, &gOrigShow1);
-
-    SafeSwizzle(NSClassFromString(@"MAInterstitialAd"), NSSelectorFromString(@"showAdForPlacement:customData:"),
-                4, (IMP)HookShow2, &gOrigShow2);
-
-    SafeSwizzle(NSClassFromString(@"MAInterstitialAd"), NSSelectorFromString(@"showAdForPlacement:customData:viewController:"),
-                5, (IMP)HookShow3, &gOrigShow3);
-
     SafeSwizzle(UIView.class, @selector(didMoveToWindow),
                 2, (IMP)HookDidMoveToWindow, &gOrigDidMoveToWindow);
 
-    Protocol *fscd = NSProtocolFromString(@"GADFullScreenContentDelegate");
-    L(@"protocol GADFullScreenContentDelegate: %@", fscd ? @"found" : @"missing");
+    SEL dismissSel = FindDismissSelector();
+    L(@"dismiss selector found: %@", dismissSel ? NSStringFromSelector(dismissSel) : @"NONE");
 
     Persist(@"constructor", YES);
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
-                   dispatch_get_main_queue(), ^{ ScanDelegateClasses(); });
 }
