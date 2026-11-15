@@ -28,19 +28,21 @@ static void Persist(NSString *stage, BOOL pasteboard) {
     if (pasteboard) UIPasteboard.generalPasteboard.string = report;
 }
 
-/* ---- أداة استبدال آمنة مع فحص التوقيع ---- */
-static BOOL SafeSwizzle(Class cls, SEL sel, const char *expectedEncPrefix, IMP newImp, IMP *outOrig) {
+/* ---- أداة استبدال آمنة: تتحقق من "عدد الوسائط" و"أن القيمة المُرجعة void" بدل مطابقة نص الترميز حرفيًا ---- */
+static BOOL SafeSwizzle(Class cls, SEL sel, unsigned expectedArgCount, IMP newImp, IMP *outOrig) {
     if (!cls) { L(@"swizzle skip: class nil for %@", NSStringFromSelector(sel)); return NO; }
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) { L(@"swizzle skip: %@ -%@ not found", NSStringFromClass(cls), NSStringFromSelector(sel)); return NO; }
     const char *enc = method_getTypeEncoding(m);
-    if (strncmp(enc, expectedEncPrefix, strlen(expectedEncPrefix)) != 0) {
-        L(@"swizzle skip: %@ -%@ encoding=%s (unexpected)", NSStringFromClass(cls), NSStringFromSelector(sel), enc);
+    unsigned argc = method_getNumberOfArguments(m);
+    if (enc[0] != 'v' || argc != expectedArgCount) {
+        L(@"swizzle skip: %@ -%@ encoding=%s argc=%u (expected void, argc=%u)",
+          NSStringFromClass(cls), NSStringFromSelector(sel), enc, argc, expectedArgCount);
         return NO;
     }
     *outOrig = method_getImplementation(m);
     method_setImplementation(m, newImp);
-    L(@"swizzle OK: %@ -%@", NSStringFromClass(cls), NSStringFromSelector(sel));
+    L(@"swizzle OK: %@ -%@ encoding=%s", NSStringFromClass(cls), NSStringFromSelector(sel), enc);
     return YES;
 }
 
@@ -104,19 +106,19 @@ __attribute__((constructor)) static void AdProbeInit(void) {
       NSBundle.mainBundle.bundleIdentifier, UIDevice.currentDevice.systemVersion);
 
     SafeSwizzle(NSClassFromString(@"GADInterstitialAd"), NSSelectorFromString(@"presentFromRootViewController:"),
-                "v@:@", (IMP)HookPresent, &gOrigPresent);
+                3, (IMP)HookPresent, &gOrigPresent);
 
     SafeSwizzle(NSClassFromString(@"MAInterstitialAd"), NSSelectorFromString(@"showAdForPlacement:"),
-                "v@:@", (IMP)HookShow1, &gOrigShow1);
+                3, (IMP)HookShow1, &gOrigShow1);
 
     SafeSwizzle(NSClassFromString(@"MAInterstitialAd"), NSSelectorFromString(@"showAdForPlacement:customData:"),
-                "v@:@@", (IMP)HookShow2, &gOrigShow2);
+                4, (IMP)HookShow2, &gOrigShow2);
 
     SafeSwizzle(NSClassFromString(@"MAInterstitialAd"), NSSelectorFromString(@"showAdForPlacement:customData:viewController:"),
-                "v@:@@@", (IMP)HookShow3, &gOrigShow3);
+                5, (IMP)HookShow3, &gOrigShow3);
 
     SafeSwizzle(UIView.class, @selector(didMoveToWindow),
-                "v@:", (IMP)HookDidMoveToWindow, &gOrigDidMoveToWindow);
+                2, (IMP)HookDidMoveToWindow, &gOrigDidMoveToWindow);
 
     Persist(@"constructor", YES);
 }
