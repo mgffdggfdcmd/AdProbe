@@ -2,13 +2,13 @@
 #import <objc/runtime.h>
 #include <dlfcn.h>
 #include <unistd.h>
+#include <string.h>
 
 static NSMutableString *gLog;
 
 static void L(NSString *fmt, ...) NS_FORMAT_FUNCTION(1, 2);
 static void L(NSString *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
+    va_list ap; va_start(ap, fmt);
     NSString *m = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
     NSLog(@"[AdProbe] %@", m);
@@ -28,43 +28,72 @@ static void Persist(NSString *stage, BOOL pasteboard) {
     if (pasteboard) UIPasteboard.generalPasteboard.string = report;
 }
 
-static NSArray<UIWindow *> *AllWindows(void) {
-    NSMutableArray<UIWindow *> *r = [NSMutableArray array];
-    UIApplication *app = UIApplication.sharedApplication;
-    for (UIScene *sc in app.connectedScenes) {
-        if ([sc isKindOfClass:UIWindowScene.class])
-            [r addObjectsFromArray:((UIWindowScene *)sc).windows];
+/* ---- أداة استبدال آمنة مع فحص التوقيع ---- */
+static BOOL SafeSwizzle(Class cls, SEL sel, const char *expectedEncPrefix, IMP newImp, IMP *outOrig) {
+    if (!cls) { L(@"swizzle skip: class nil for %@", NSStringFromSelector(sel)); return NO; }
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) { L(@"swizzle skip: %@ -%@ not found", NSStringFromClass(cls), NSStringFromSelector(sel)); return NO; }
+    const char *enc = method_getTypeEncoding(m);
+    if (strncmp(enc, expectedEncPrefix, strlen(expectedEncPrefix)) != 0) {
+        L(@"swizzle skip: %@ -%@ encoding=%s (unexpected)", NSStringFromClass(cls), NSStringFromSelector(sel), enc);
+        return NO;
     }
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    for (UIWindow *w in app.windows) if (![r containsObject:w]) [r addObject:w];
-#pragma clang diagnostic pop
-    return r;
+    *outOrig = method_getImplementation(m);
+    method_setImplementation(m, newImp);
+    L(@"swizzle OK: %@ -%@", NSStringFromClass(cls), NSStringFromSelector(sel));
+    return YES;
 }
 
-static void Phase2(NSString *why) {
-    static BOOL done;
-    if (done) return;
-    done = YES;
-    UIApplication *app = UIApplication.sharedApplication;
-    NSArray<UIWindow *> *ws = AllWindows();
-    L(@"phase2 trigger=%@ appState=%ld scenes=%lu windows=%lu", why,
-      (long)app.applicationState, (unsigned long)app.connectedScenes.count,
-      (unsigned long)ws.count);
-    UIViewController *top = nil;
-    for (UIWindow *w in ws) {
-        L(@"window %@ key=%d root=%@", NSStringFromClass(w.class), w.isKeyWindow,
-          w.rootViewController ? NSStringFromClass(w.rootViewController.class) : @"nil");
-        if (w.rootViewController && (w.isKeyWindow || !top)) top = w.rootViewController;
+/* ---- GADInterstitialAd presentFromRootViewController: ---- */
+static IMP gOrigPresent;
+static void HookPresent(id self, SEL _cmd, UIViewController *vc) {
+    L(@"EVENT GADInterstitialAd presentFromRootViewController: vc=%@", NSStringFromClass(vc.class));
+    Persist(@"event", YES);
+    ((void(*)(id,SEL,UIViewController*))gOrigPresent)(self, _cmd, vc);
+}
+
+/* ---- MAInterstitialAd showAdForPlacement: ---- */
+static IMP gOrigShow1;
+static void HookShow1(id self, SEL _cmd, NSString *placement) {
+    L(@"EVENT MAInterstitialAd showAdForPlacement: placement=%@", placement);
+    Persist(@"event", YES);
+    ((void(*)(id,SEL,NSString*))gOrigShow1)(self, _cmd, placement);
+}
+
+/* ---- MAInterstitialAd showAdForPlacement:customData: ---- */
+static IMP gOrigShow2;
+static void HookShow2(id self, SEL _cmd, NSString *placement, NSString *customData) {
+    L(@"EVENT MAInterstitialAd showAdForPlacement:customData: placement=%@", placement);
+    Persist(@"event", YES);
+    ((void(*)(id,SEL,NSString*,NSString*))gOrigShow2)(self, _cmd, placement, customData);
+}
+
+/* ---- MAInterstitialAd showAdForPlacement:customData:viewController: ---- */
+static IMP gOrigShow3;
+static void HookShow3(id self, SEL _cmd, NSString *placement, NSString *customData, UIViewController *vc) {
+    L(@"EVENT MAInterstitialAd showAdForPlacement:customData:viewController: placement=%@", placement);
+    Persist(@"event", YES);
+    ((void(*)(id,SEL,NSString*,NSString*,UIViewController*))gOrigShow3)(self, _cmd, placement, customData, vc);
+}
+
+/* ---- UIView didMoveToWindow (مراقبة ظهور البانر فقط، آمن ومحايد) ---- */
+static IMP gOrigDidMoveToWindow;
+static void HookDidMoveToWindow(UIView *self, SEL _cmd) {
+    static Class bannerCls, maxAdViewCls, maxNativeCls;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        bannerCls = NSClassFromString(@"GADBannerView");
+        maxAdViewCls = NSClassFromString(@"AppLovinMAXAdView");
+        maxNativeCls = NSClassFromString(@"AppLovinMAXNativeAdView");
+    });
+    if ((bannerCls && [self isKindOfClass:bannerCls]) ||
+        (maxAdViewCls && [self isKindOfClass:maxAdViewCls]) ||
+        (maxNativeCls && [self isKindOfClass:maxNativeCls])) {
+        L(@"EVENT banner didMoveToWindow class=%@ window=%@", NSStringFromClass(self.class),
+          self.window ? @"attached" : @"detached");
+        Persist(@"event", YES);
     }
-    while (top.presentedViewController) top = top.presentedViewController;
-    L(@"alert will be presented: %@", top ? @"yes" : @"no (no rootVC)");
-    Persist(@"phase2", YES);
-    if (!top) return;
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"AdProbe loaded"
-        message:@"constructor + phase2 ran" preferredStyle:UIAlertControllerStyleAlert];
-    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [top presentViewController:a animated:YES completion:nil];
+    ((void(*)(id,SEL))gOrigDidMoveToWindow)(self, _cmd);
 }
 
 __attribute__((constructor)) static void AdProbeInit(void) {
@@ -73,17 +102,21 @@ __attribute__((constructor)) static void AdProbeInit(void) {
     if (dladdr((void *)&AdProbeInit, &info)) L(@"image=%s", info.dli_fname);
     L(@"constructor pid=%d bundle=%@ ios=%@", getpid(),
       NSBundle.mainBundle.bundleIdentifier, UIDevice.currentDevice.systemVersion);
-    NSArray *names = @[@"FLTBannerAd", @"FLTInterstitialAd", @"FLTRewardedAd",
-                       @"AppLovinMAX", @"MAInterstitialAd", @"GADBannerView", @"GADInterstitialAd"];
-    for (NSString *n in names) L(@"%@: %@", n, NSClassFromString(n) ? @"found" : @"missing");
-    Persist(@"constructor", NO);
 
-    [[NSNotificationCenter defaultCenter]
-        addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
-        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
-                           dispatch_get_main_queue(), ^{ Phase2(@"didBecomeActive"); });
-        }];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 12 * NSEC_PER_SEC),
-                   dispatch_get_main_queue(), ^{ Phase2(@"fallback12s"); });
+    SafeSwizzle(NSClassFromString(@"GADInterstitialAd"), NSSelectorFromString(@"presentFromRootViewController:"),
+                "v@:@", (IMP)HookPresent, &gOrigPresent);
+
+    SafeSwizzle(NSClassFromString(@"MAInterstitialAd"), NSSelectorFromString(@"showAdForPlacement:"),
+                "v@:@", (IMP)HookShow1, &gOrigShow1);
+
+    SafeSwizzle(NSClassFromString(@"MAInterstitialAd"), NSSelectorFromString(@"showAdForPlacement:customData:"),
+                "v@:@@", (IMP)HookShow2, &gOrigShow2);
+
+    SafeSwizzle(NSClassFromString(@"MAInterstitialAd"), NSSelectorFromString(@"showAdForPlacement:customData:viewController:"),
+                "v@:@@@", (IMP)HookShow3, &gOrigShow3);
+
+    SafeSwizzle(UIView.class, @selector(didMoveToWindow),
+                "v@:", (IMP)HookDidMoveToWindow, &gOrigDidMoveToWindow);
+
+    Persist(@"constructor", NO);
 }
