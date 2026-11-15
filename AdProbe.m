@@ -92,6 +92,24 @@ static void HookDidMoveToWindow(UIView *self, SEL _cmd) {
     ((void(*)(id,SEL))gOrigDidMoveToWindow)(self, _cmd);
 }
 
+/* ---- جديد: مسح كل الفئات المحمَّلة لإيجاد من يطبّق بروتوكول تبليغ إغلاق الإعلان ---- */
+static void ScanDelegateClasses(void) {
+    Protocol *fscd = NSProtocolFromString(@"GADFullScreenContentDelegate");
+    if (!fscd) { L(@"scan: protocol missing"); Persist(@"scan", YES); return; }
+    unsigned int count = 0;
+    Class *classes = objc_copyClassList(&count);
+    NSMutableArray *matches = [NSMutableArray array];
+    for (unsigned int i = 0; i < count; i++) {
+        if (class_conformsToProtocol(classes[i], fscd)) {
+            [matches addObject:NSStringFromClass(classes[i])];
+        }
+    }
+    free(classes);
+    L(@"scan: classes conforming to GADFullScreenContentDelegate = %lu", (unsigned long)matches.count);
+    for (NSString *n in matches) L(@"  - %@", n);
+    Persist(@"scan", YES);
+}
+
 __attribute__((constructor)) static void AdProbeInit(void) {
     gLog = [NSMutableString string];
     Dl_info info;
@@ -114,9 +132,11 @@ __attribute__((constructor)) static void AdProbeInit(void) {
     SafeSwizzle(UIView.class, @selector(didMoveToWindow),
                 2, (IMP)HookDidMoveToWindow, &gOrigDidMoveToWindow);
 
-    /* سطر جديد فقط: نتأكد هل بروتوكول تبليغ إغلاق الإعلان موجود، بدون أي ربط فعلي بعد */
     Protocol *fscd = NSProtocolFromString(@"GADFullScreenContentDelegate");
     L(@"protocol GADFullScreenContentDelegate: %@", fscd ? @"found" : @"missing");
 
     Persist(@"constructor", YES);
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{ ScanDelegateClasses(); });
 }
